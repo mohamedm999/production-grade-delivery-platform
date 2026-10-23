@@ -133,6 +133,10 @@ export default function DeliveryMap({
 
   const [tileError, setTileError] = useState(false);
 
+  const isLocateMode = mode === "locate";
+  const isDrawMode = mode === "draw" || isDrawing;
+  const isViewMode = !isLocateMode && !isDrawMode;
+
   return (
     <div className={`relative overflow-hidden rounded-xl border border-slate-200 bg-slate-100 ${className}`}>
       {/* Mode Status Pill Overlay */}
@@ -209,29 +213,41 @@ export default function DeliveryMap({
                 dashArray: zone.active ? undefined : "6, 6",
               }}
               eventHandlers={{
-                click: () => onZoneSelect?.(zone),
+                click: (e) => {
+                  if (isLocateMode && onCustomerLocationChange) {
+                    L.DomEvent.stopPropagation(e.originalEvent);
+                    onCustomerLocationChange({ lat: e.latlng.lat, lng: e.latlng.lng });
+                  } else if (isDrawMode && onAddDrawingPoint) {
+                    L.DomEvent.stopPropagation(e.originalEvent);
+                    onAddDrawingPoint([e.latlng.lat, e.latlng.lng]);
+                  } else if (isViewMode) {
+                    onZoneSelect?.(zone);
+                  }
+                },
               }}
             >
-              <Popup>
-                <div className="text-xs space-y-1 p-0.5">
-                  <div className="flex items-center gap-1.5 font-bold text-slate-900">
-                    <span
-                      className="h-2.5 w-2.5 rounded-full"
-                      style={{ backgroundColor: zone.active ? color : "#94a3b8" }}
-                    />
-                    <span>{zone.name}</span>
+              {isViewMode && (
+                <Popup>
+                  <div className="text-xs space-y-1 p-0.5">
+                    <div className="flex items-center gap-1.5 font-bold text-slate-900">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: zone.active ? color : "#94a3b8" }}
+                      />
+                      <span>{zone.name}</span>
+                    </div>
+                    <div className="text-slate-600">
+                      Delivery Fee: <strong>{formatCurrency(zone.delivery_fee)}</strong>
+                    </div>
+                    <div className="text-[11px] font-medium">
+                      Status:{" "}
+                      <span className={zone.active ? "text-emerald-700 font-semibold" : "text-slate-500"}>
+                        {zone.active ? "Active" : "Paused / Offline"}
+                      </span>
+                    </div>
                   </div>
-                  <div className="text-slate-600">
-                    Delivery Fee: <strong>{formatCurrency(zone.delivery_fee)}</strong>
-                  </div>
-                  <div className="text-[11px] font-medium">
-                    Status:{" "}
-                    <span className={zone.active ? "text-emerald-700 font-semibold" : "text-slate-500"}>
-                      {zone.active ? "Active" : "Paused / Offline"}
-                    </span>
-                  </div>
-                </div>
-              </Popup>
+                </Popup>
+              )}
             </Polygon>
           );
         })}
@@ -274,6 +290,14 @@ export default function DeliveryMap({
           <Marker
             position={[customerLocation.lat, customerLocation.lng]}
             icon={customerPinIcon}
+            draggable={isLocateMode}
+            eventHandlers={{
+              dragend: (e) => {
+                const marker = e.target;
+                const position = marker.getLatLng();
+                onCustomerLocationChange?.({ lat: position.lat, lng: position.lng });
+              },
+            }}
           >
             <Popup>
               <div className="text-xs space-y-1 p-0.5">
@@ -281,6 +305,11 @@ export default function DeliveryMap({
                 <span className="text-[11px] font-mono text-slate-600 block">
                   {customerLocation.lat.toFixed(5)}, {customerLocation.lng.toFixed(5)}
                 </span>
+                {isLocateMode && (
+                  <span className="text-[10px] text-indigo-600 block font-medium">
+                    Drag pin to fine-tune location
+                  </span>
+                )}
               </div>
             </Popup>
           </Marker>
