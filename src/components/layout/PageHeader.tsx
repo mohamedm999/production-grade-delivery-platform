@@ -1,0 +1,31 @@
+import React from "react";
+import { cn } from "@/lib/utils";
+
+export interface PageHeaderProps {
+  title: string;
+  description?: string;
+  action?: React.ReactNode;
+  badge?: React.ReactNode;
+  className?: string;
+}
+
+export const PageHeader: React.FC<PageHeaderProps> = ({
+  title,
+  description,
+  action,
+  badge,
+  className,
+}) => {
+  return (
+    <div className={cn("flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between pb-6", className)}>
+      <div className="space-y-1">
+        <div className="flex items-center gap-2.5">
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">{title}</h1>
+          {badge}
+        </div>
+        {description && <p className="text-xs sm:text-sm text-slate-500">{description}</p>}
+      </div>
+      {action && <div className="flex items-center gap-2 shrink-0">{action}</div>}
+    </div>
+  );
+};
