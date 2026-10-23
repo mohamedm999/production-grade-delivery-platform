@@ -1,10 +1,10 @@
 import React from "react";
 import { cn } from "@/lib/utils";
-import { OrderStatus } from "@/lib/mock-data";
+import { OrderStatus } from "@/lib/types/database";
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   variant?: "default" | "success" | "warning" | "danger" | "info" | "neutral";
-  status?: OrderStatus;
+  status?: OrderStatus | "out_for_delivery" | "processing" | "delivered" | "cancelled";
 }
 
 export const Badge: React.FC<BadgeProps> = ({ className, variant = "default", status, children, ...props }) => {
@@ -17,13 +17,21 @@ export const Badge: React.FC<BadgeProps> = ({ className, variant = "default", st
         badgeVariant = "warning";
         label = label || "Pending";
         break;
+      case "validated":
+        badgeVariant = "success";
+        label = label || "Validated";
+        break;
+      case "rejected":
+        badgeVariant = "danger";
+        label = label || "Rejected";
+        break;
       case "processing":
         badgeVariant = "info";
         label = label || "Processing";
         break;
       case "out_for_delivery":
         badgeVariant = "default";
-        label = label || "Out for Delivery";
+        label = label || "In Transit";
         break;
       case "delivered":
         badgeVariant = "success";
