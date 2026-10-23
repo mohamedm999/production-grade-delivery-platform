@@ -11,23 +11,24 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { DatabaseOrder, DatabaseOrderItem, OrderStatus } from "@/lib/types/database";
 import { formatCurrency } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
+import { OrderCreateModal } from "@/components/order/OrderCreateModal";
 import {
   ShoppingBag,
   Search,
   Eye,
   Phone,
   MapPin,
-  Clock,
   CheckCircle2,
   AlertCircle,
   Filter,
   Loader2,
   RefreshCw,
+  Plus,
 } from "lucide-react";
 
 interface EnrichedOrder extends DatabaseOrder {
-  delivery_zones?: { name: string } | null;
-  order_items?: (DatabaseOrderItem & { products?: { name: string } | null })[];
+  delivery_zones?: { name: string; delivery_fee: number } | null;
+  order_items?: (DatabaseOrderItem & { products?: { name: string; category?: string } | null })[];
 }
 
 export default function OrdersPage() {
@@ -36,6 +37,7 @@ export default function OrdersPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedOrder, setSelectedOrder] = useState<EnrichedOrder | null>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [statusNotice, setStatusNotice] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const fetchOrders = useCallback(async () => {
@@ -44,7 +46,7 @@ export default function OrdersPage() {
       const supabase = createClient();
       const { data, error } = await supabase
         .from("orders")
-        .select("*, delivery_zones(name), order_items(*, products(name))")
+        .select("*, delivery_zones(name, delivery_fee), order_items(*, products(name, category))")
         .order("created_at", { ascending: false });
 
       if (error) {
@@ -103,7 +105,7 @@ export default function OrdersPage() {
     <AppLayout>
       <PageHeader
         title="Customer Orders"
-        description="Fulfillment queue and live dispatch records from Supabase."
+        description="Live order creation and geofenced fulfillment records from Supabase."
         badge={
           <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
@@ -111,9 +113,15 @@ export default function OrdersPage() {
           </span>
         }
         action={
-          <Button onClick={fetchOrders} variant="outline" size="sm" title="Refresh orders">
-            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button onClick={fetchOrders} variant="outline" size="sm" title="Refresh orders">
+              <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
+            </Button>
+            <Button onClick={() => setIsCreateModalOpen(true)} variant="primary" size="sm">
+              <Plus className="h-4 w-4 mr-1.5" />
+              Create Order
+            </Button>
+          </div>
         }
       />
 
@@ -152,8 +160,8 @@ export default function OrdersPage() {
           <Filter className="h-3.5 w-3.5 text-slate-400 mr-1 hidden sm:inline" />
           {[
             { id: "all", label: "All Orders" },
-            { id: "pending", label: "Pending" },
             { id: "validated", label: "Validated" },
+            { id: "pending", label: "Pending" },
             { id: "rejected", label: "Rejected" },
           ].map((tab) => (
             <button
@@ -183,11 +191,16 @@ export default function OrdersPage() {
           title={orders.length === 0 ? "No orders in Supabase database" : "No orders matched your filter"}
           description={
             orders.length === 0
-              ? "Your orders table in Supabase is currently empty. Customer checkout orders will appear here."
+              ? "Your orders table in Supabase is currently empty. Click below to create your first order with delivery zone validation."
               : "No orders match your filter criteria. Try resetting search or status filters."
           }
           action={
-            searchTerm || statusFilter !== "all" ? (
+            orders.length === 0 ? (
+              <Button variant="primary" size="sm" onClick={() => setIsCreateModalOpen(true)}>
+                <Plus className="h-3.5 w-3.5 mr-1" />
+                Create First Order
+              </Button>
+            ) : (
               <Button
                 variant="outline"
                 size="sm"
@@ -198,7 +211,7 @@ export default function OrdersPage() {
               >
                 Reset Filters
               </Button>
-            ) : null
+            )
           }
         />
       ) : (
@@ -227,7 +240,10 @@ export default function OrdersPage() {
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
                     <span>
-                      Zone: <strong className="text-slate-600">{order.delivery_zones?.name || "Unassigned"}</strong>
+                      Zone:{" "}
+                      <strong className={order.delivery_zones?.name ? "text-slate-700" : "text-amber-600"}>
+                        {order.delivery_zones?.name || "Outside Service Area"}
+                      </strong>
                     </span>
                     <span>{order.order_items?.length || 0} item(s)</span>
                   </div>
@@ -282,7 +298,10 @@ export default function OrdersPage() {
                     <td className="py-3.5 px-4">
                       <div className="text-xs text-slate-700 max-w-xs truncate">{order.customer_address}</div>
                       <div className="text-[11px] text-slate-400">
-                        Zone: <span className="font-medium text-slate-600">{order.delivery_zones?.name || "Unassigned"}</span>
+                        Zone:{" "}
+                        <span className={order.delivery_zones?.name ? "font-medium text-slate-700" : "font-medium text-amber-600"}>
+                          {order.delivery_zones?.name || "Outside Service Area"}
+                        </span>
                       </div>
                     </td>
                     <td className="py-3.5 px-4">
@@ -369,7 +388,11 @@ export default function OrdersPage() {
                 </span>
                 <div className="text-xs text-slate-800 line-clamp-2">{selectedOrder.customer_address}</div>
                 <div className="text-[11px] text-slate-500 font-mono">
-                  Coordinates: {selectedOrder.latitude.toFixed(4)}, {selectedOrder.longitude.toFixed(4)}
+                  Coordinates: {selectedOrder.latitude.toFixed(5)}, {selectedOrder.longitude.toFixed(5)}
+                </div>
+                <div className="text-[11px] text-slate-600">
+                  Assigned Zone:{" "}
+                  <strong>{selectedOrder.delivery_zones?.name || "Outside Active Zones"}</strong>
                 </div>
               </div>
             </div>
@@ -414,6 +437,13 @@ export default function OrdersPage() {
           </div>
         </Modal>
       )}
+
+      {/* Order Creation Modal */}
+      <OrderCreateModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onOrderCreated={fetchOrders}
+      />
     </AppLayout>
   );
 }
