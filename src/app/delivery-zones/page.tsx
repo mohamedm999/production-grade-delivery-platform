@@ -11,10 +11,11 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { DatabaseDeliveryZone } from "@/lib/types/database";
 import { formatCurrency } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
+import DeliveryMapDynamic from "@/components/map/DeliveryMapDynamic";
+import { LatLngTuple } from "@/lib/geo/normalize-polygon";
 import {
   MapPin,
   Plus,
-  Map,
   Compass,
   CheckCircle2,
   AlertCircle,
@@ -22,33 +23,30 @@ import {
   ToggleRight,
   Layers,
   Trash2,
-  Loader2,
   RefreshCw,
+  Edit3,
+  Undo2,
+  X,
+  Navigation,
+  Check,
 } from "lucide-react";
 
 export default function DeliveryZonesPage() {
   const [zones, setZones] = useState<DatabaseDeliveryZone[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
+
+  // Map Mode: "view" | "draw" | "locate"
+  const [mapMode, setMapMode] = useState<"view" | "draw" | "locate">("view");
+  const [drawingPoints, setDrawingPoints] = useState<LatLngTuple[]>([]);
+  const [testedCustomerLocation, setTestedCustomerLocation] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Save Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-
-  // Form State
   const [formName, setFormName] = useState("");
-  const [formFee, setFormFee] = useState("");
+  const [formFee, setFormFee] = useState("3.00");
   const [formColor, setFormColor] = useState("#4f46e5");
-  const [formCoordinates, setFormCoordinates] = useState(
-    JSON.stringify(
-      [
-        [-7.63, 33.6],
-        [-7.59, 33.6],
-        [-7.59, 33.575],
-        [-7.63, 33.575],
-        [-7.63, 33.6],
-      ],
-      null,
-      2
-    )
-  );
   const [formError, setFormError] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
@@ -78,6 +76,86 @@ export default function DeliveryZonesPage() {
     fetchZones();
   }, [fetchZones]);
 
+  // Handle polygon drawing
+  const handleAddDrawingPoint = (point: LatLngTuple) => {
+    setDrawingPoints((prev) => [...prev, point]);
+  };
+
+  const handleUndoPoint = () => {
+    setDrawingPoints((prev) => prev.slice(0, -1));
+  };
+
+  const handleCancelDrawing = () => {
+    setDrawingPoints([]);
+    setMapMode("view");
+  };
+
+  const handleStartDrawing = () => {
+    setDrawingPoints([]);
+    setSelectedZoneId(null);
+    setTestedCustomerLocation(null);
+    setMapMode("draw");
+  };
+
+  const handleOpenSaveModal = () => {
+    if (drawingPoints.length < 3) {
+      alert("A delivery zone polygon requires at least 3 points. Click on the map to add more points.");
+      return;
+    }
+    setFormError(null);
+    setIsModalOpen(true);
+  };
+
+  const handleSaveDrawnZone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formName.trim()) {
+      setFormError("Zone name is required.");
+      return;
+    }
+    const feeNum = parseFloat(formFee);
+    if (isNaN(feeNum) || feeNum < 0) {
+      setFormError("Please enter a valid non-negative delivery fee.");
+      return;
+    }
+    if (drawingPoints.length < 3) {
+      setFormError("A polygon must have at least 3 vertices.");
+      return;
+    }
+
+    // Format as array of latitude/longitude pairs as explicitly required:
+    // [[lat, lng], [lat, lng], ...]
+    const polygonCoordinates = drawingPoints.map(([lat, lng]) => [lat, lng]);
+
+    setIsSaving(true);
+    setFormError(null);
+
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.from("delivery_zones").insert({
+        name: formName.trim(),
+        delivery_fee: feeNum,
+        color: formColor,
+        active: true,
+        polygon: polygonCoordinates,
+      });
+
+      if (error) throw error;
+
+      setIsModalOpen(false);
+      setDrawingPoints([]);
+      setMapMode("view");
+      setFormName("");
+      setStatusNotice({ type: "success", message: `Saved zone "${formName}" to Supabase!` });
+      await fetchZones();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to save zone.";
+      setFormError(msg);
+    } finally {
+      setIsSaving(false);
+      setTimeout(() => setStatusNotice(null), 4000);
+    }
+  };
+
   const toggleZoneStatus = async (id: string, currentActive: boolean, name: string) => {
     try {
       const supabase = createClient();
@@ -98,7 +176,7 @@ export default function DeliveryZonesPage() {
       });
       setTimeout(() => setStatusNotice(null), 3000);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to update zone status.";
+      const msg = err instanceof Error ? err.message : "Failed to toggle zone status.";
       setStatusNotice({ type: "error", message: msg });
     }
   };
@@ -114,6 +192,7 @@ export default function DeliveryZonesPage() {
       if (error) throw error;
 
       setZones((prev) => prev.filter((z) => z.id !== id));
+      if (selectedZoneId === id) setSelectedZoneId(null);
       setStatusNotice({ type: "success", message: `Deleted zone "${name}".` });
       setTimeout(() => setStatusNotice(null), 3000);
     } catch (err: unknown) {
@@ -122,75 +201,11 @@ export default function DeliveryZonesPage() {
     }
   };
 
-  const handleCreateZone = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formName.trim()) {
-      setFormError("Zone name is required.");
-      return;
-    }
-    const feeNum = parseFloat(formFee);
-    if (isNaN(feeNum) || feeNum < 0) {
-      setFormError("Please enter a valid delivery fee (e.g. 2.50).");
-      return;
-    }
-
-    let parsedCoords: number[][];
-    try {
-      parsedCoords = JSON.parse(formCoordinates);
-      if (!Array.isArray(parsedCoords) || parsedCoords.length < 3) {
-        throw new Error("Coordinates must be an array of at least 3 [lng, lat] points.");
-      }
-    } catch (err: unknown) {
-      setFormError("Invalid polygon JSON: must be valid GeoJSON coordinate array [[lng, lat], ...].");
-      return;
-    }
-
-    // Ensure polygon is closed (first and last match)
-    const first = parsedCoords[0];
-    const last = parsedCoords[parsedCoords.length - 1];
-    if (first[0] !== last[0] || first[1] !== last[1]) {
-      parsedCoords.push([...first]);
-    }
-
-    const polygonPayload = {
-      type: "Polygon",
-      coordinates: [parsedCoords],
-    };
-
-    setIsSaving(true);
-    setFormError(null);
-
-    try {
-      const supabase = createClient();
-      const { error } = await supabase.from("delivery_zones").insert({
-        name: formName.trim(),
-        delivery_fee: feeNum,
-        color: formColor,
-        active: true,
-        polygon: polygonPayload,
-      });
-
-      if (error) throw error;
-
-      setIsModalOpen(false);
-      setFormName("");
-      setFormFee("");
-      setStatusNotice({ type: "success", message: `Saved "${formName}" into Supabase!` });
-      await fetchZones();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to save delivery zone.";
-      setFormError(msg);
-    } finally {
-      setIsSaving(false);
-      setTimeout(() => setStatusNotice(null), 4000);
-    }
-  };
-
   return (
     <AppLayout>
       <PageHeader
-        title="Delivery Zones"
-        description="Geofenced boundaries stored live in Supabase PostgreSQL."
+        title="Delivery Zones & Map"
+        description="Interactive OpenStreetMap polygon management and live geofenced zones."
         badge={
           <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-200">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
@@ -202,10 +217,21 @@ export default function DeliveryZonesPage() {
             <Button onClick={fetchZones} variant="outline" size="sm" title="Refresh zones">
               <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
             </Button>
-            <Button onClick={() => setIsModalOpen(true)} variant="primary" size="sm">
-              <Plus className="h-4 w-4 mr-1.5" />
-              Add Delivery Zone
-            </Button>
+            {mapMode === "view" ? (
+              <Button onClick={handleStartDrawing} variant="primary" size="sm">
+                <Edit3 className="h-4 w-4 mr-1.5" />
+                Draw Zone on Map
+              </Button>
+            ) : mapMode === "draw" ? (
+              <Button onClick={handleCancelDrawing} variant="outline" size="sm">
+                <X className="h-4 w-4 mr-1.5" />
+                Cancel Drawing
+              </Button>
+            ) : (
+              <Button onClick={() => setMapMode("view")} variant="outline" size="sm">
+                Return to Zones View
+              </Button>
+            )}
           </div>
         }
       />
@@ -227,58 +253,106 @@ export default function DeliveryZonesPage() {
         </div>
       )}
 
-      {/* Main Layout: Map Container + Zone List */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Map Container Placeholder (Span 7) */}
-        <div className="lg:col-span-7">
-          <Card className="overflow-hidden p-0 border-slate-200">
-            <div className="border-b border-slate-100 bg-slate-50/75 px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Map className="h-4 w-4 text-indigo-600" />
-                <span className="text-xs font-semibold text-slate-800">Geospatial Service Coverage</span>
-              </div>
-              <span className="text-[10px] font-semibold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full border border-emerald-200">
-                {zones.length} Boundaries Loaded
-              </span>
-            </div>
-
-            {/* Map Placeholder Graphic / Area */}
-            <div className="relative h-80 sm:h-96 w-full bg-slate-950 flex flex-col items-center justify-center p-6 text-center overflow-hidden">
-              <div
-                className="absolute inset-0 opacity-20"
-                style={{
-                  backgroundImage:
-                    "radial-gradient(circle at 1px 1px, rgba(255,255,255,0.4) 1px, transparent 0)",
-                  backgroundSize: "24px 24px",
-                }}
-              />
-
-              <div className="relative z-10 max-w-sm space-y-3">
-                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30">
-                  <Compass className="h-6 w-6 animate-pulse" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-white">
-                    Live Supabase Zones Connected
-                  </h3>
-                  <p className="mt-1 text-xs text-slate-400 leading-relaxed">
-                    Interactive OpenStreetMap Leaflet rendering and customer pin validation connect in Phase 4. All zone polygons are read and written to Supabase PostgreSQL.
-                  </p>
-                </div>
-                <div className="flex flex-wrap justify-center gap-2 pt-1">
-                  <span className="text-[10px] bg-slate-800 text-slate-300 px-2.5 py-1 rounded-md border border-slate-700">
-                    {zones.filter((z) => z.active).length} Active Zones
-                  </span>
-                  <span className="text-[10px] bg-slate-800 text-slate-300 px-2.5 py-1 rounded-md border border-slate-700">
-                    GeoJSON Standard Polygon
-                  </span>
-                </div>
-              </div>
-            </div>
-          </Card>
+      {/* Mode Switcher Bar */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white p-3 border border-slate-200 shadow-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-slate-700">Map Mode:</span>
+          <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1">
+            <button
+              onClick={() => {
+                setMapMode("view");
+                setDrawingPoints([]);
+              }}
+              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                mapMode === "view" ? "bg-white text-indigo-700 shadow-xs font-semibold" : "text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              Browse Zones
+            </button>
+            <button
+              onClick={handleStartDrawing}
+              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                mapMode === "draw" ? "bg-indigo-600 text-white shadow-xs font-semibold" : "text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              Draw Polygon
+            </button>
+            <button
+              onClick={() => {
+                setMapMode("locate");
+                setDrawingPoints([]);
+              }}
+              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                mapMode === "locate" ? "bg-white text-indigo-700 shadow-xs font-semibold" : "text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              Test Pin Drop
+            </button>
+          </div>
         </div>
 
-        {/* Zone List & Controls (Span 5) */}
+        {mapMode === "draw" && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono text-slate-700 bg-indigo-50 px-2.5 py-1 rounded-md border border-indigo-200">
+              {drawingPoints.length} vertices added
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleUndoPoint}
+              disabled={drawingPoints.length === 0}
+              className="text-xs h-8 px-2.5"
+            >
+              <Undo2 className="h-3.5 w-3.5 mr-1" />
+              Undo
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleOpenSaveModal}
+              disabled={drawingPoints.length < 3}
+              className="text-xs h-8 px-3"
+            >
+              <Check className="h-3.5 w-3.5 mr-1" />
+              Finish & Save Zone
+            </Button>
+          </div>
+        )}
+
+        {mapMode === "locate" && testedCustomerLocation && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-slate-600 font-mono">
+              Pin: {testedCustomerLocation.lat.toFixed(5)}, {testedCustomerLocation.lng.toFixed(5)}
+            </span>
+            <button
+              onClick={() => setTestedCustomerLocation(null)}
+              className="text-rose-600 hover:text-rose-700 underline text-xs"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Main Grid: Interactive Map + Delivery Zones List */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Interactive Leaflet Map Container (Span 7) */}
+        <div className="lg:col-span-7">
+          <DeliveryMapDynamic
+            zones={zones}
+            selectedZoneId={selectedZoneId}
+            onZoneSelect={(zone) => setSelectedZoneId(zone.id)}
+            isDrawing={mapMode === "draw"}
+            drawingPoints={drawingPoints}
+            onAddDrawingPoint={handleAddDrawingPoint}
+            customerLocation={testedCustomerLocation}
+            onCustomerLocationChange={setTestedCustomerLocation}
+            mode={mapMode}
+            className="h-[460px] sm:h-[500px] w-full"
+          />
+        </div>
+
+        {/* Zones List & Management Panel (Span 5) */}
         <div className="lg:col-span-5 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
@@ -292,91 +366,103 @@ export default function DeliveryZonesPage() {
 
           {isLoading ? (
             <div className="py-8 flex flex-col items-center justify-center space-y-2">
-              <Loader2 className="h-6 w-6 animate-spin text-indigo-600" />
-              <p className="text-xs text-slate-500">Loading delivery zones...</p>
+              <span className="text-xs text-slate-500">Loading delivery zones from database...</span>
             </div>
           ) : zones.length === 0 ? (
             <EmptyState
               icon={MapPin}
-              title="No delivery zones found"
-              description="No zones exist in your Supabase database. Add one to set up delivery boundaries."
+              title="No delivery zones configured"
+              description="Your database has no delivery boundaries. Click 'Draw Zone on Map' to create one."
               action={
-                <Button variant="primary" size="sm" onClick={() => setIsModalOpen(true)}>
-                  <Plus className="h-3.5 w-3.5 mr-1" />
-                  Add First Zone
+                <Button variant="primary" size="sm" onClick={handleStartDrawing}>
+                  <Edit3 className="h-3.5 w-3.5 mr-1" />
+                  Draw First Zone
                 </Button>
               }
             />
           ) : (
             <div className="space-y-3">
-              {zones.map((zone) => (
-                <Card key={zone.id} compact className="space-y-3 hover:border-slate-300">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className="h-3 w-3 rounded-full shrink-0 shadow-xs"
-                          style={{ backgroundColor: zone.color || "#4f46e5" }}
-                        />
-                        <h4 className="text-sm font-semibold text-slate-900">{zone.name}</h4>
+              {zones.map((zone) => {
+                const isSelected = selectedZoneId === zone.id;
+
+                return (
+                  <Card
+                    key={zone.id}
+                    compact
+                    onClick={() => setSelectedZoneId(zone.id)}
+                    className={`space-y-3 cursor-pointer transition-all ${
+                      isSelected
+                        ? "border-indigo-500 bg-indigo-50/20 shadow-sm ring-1 ring-indigo-500"
+                        : "hover:border-slate-300"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="h-3 w-3 rounded-full shrink-0 shadow-xs"
+                            style={{ backgroundColor: zone.active ? zone.color || "#4f46e5" : "#94a3b8" }}
+                          />
+                          <h4 className="text-sm font-semibold text-slate-900">{zone.name}</h4>
+                        </div>
+                        <p className="text-xs text-slate-500">
+                          Baseline Fee: <strong className="text-slate-800">{formatCurrency(zone.delivery_fee)}</strong>
+                        </p>
                       </div>
-                      <p className="text-xs text-slate-500 font-mono text-[11px]">
-                        Points: {zone.polygon?.coordinates?.[0]?.length || 0} vertices
-                      </p>
+
+                      <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => toggleZoneStatus(zone.id, zone.active, zone.name)}
+                          className="text-slate-600 hover:text-indigo-600 transition-colors p-1"
+                          title={zone.active ? "Deactivate zone" : "Activate zone"}
+                          aria-label={`Toggle active state for ${zone.name}`}
+                        >
+                          {zone.active ? (
+                            <ToggleRight className="h-6 w-6 text-indigo-600" />
+                          ) : (
+                            <ToggleLeft className="h-6 w-6 text-slate-400" />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteZone(zone.id, zone.name)}
+                          className="text-slate-400 hover:text-rose-600 transition-colors p-1"
+                          title="Delete zone"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onClick={() => toggleZoneStatus(zone.id, zone.active, zone.name)}
-                        className="text-slate-600 hover:text-indigo-600 transition-colors p-1"
-                        title={zone.active ? "Deactivate zone" : "Activate zone"}
-                        aria-label={`Toggle active state for ${zone.name}`}
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
+                      <span className="text-slate-400 text-[11px]">
+                        {isSelected ? "Selected on Map" : "Click to view on Map"}
+                      </span>
+                      <span
+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                          zone.active
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : "bg-slate-100 text-slate-500 border-slate-200"
+                        }`}
                       >
-                        {zone.active ? (
-                          <ToggleRight className="h-6 w-6 text-indigo-600" />
-                        ) : (
-                          <ToggleLeft className="h-6 w-6 text-slate-400" />
-                        )}
-                      </button>
-                      <button
-                        onClick={() => handleDeleteZone(zone.id, zone.name)}
-                        className="text-slate-400 hover:text-rose-600 transition-colors p-1"
-                        title="Delete zone"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                        {zone.active ? "Active" : "Paused / Offline"}
+                      </span>
                     </div>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
-                    <div className="text-slate-500">
-                      Fee: <strong className="text-slate-800">{formatCurrency(zone.delivery_fee)}</strong>
-                    </div>
-                    <span
-                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
-                        zone.active
-                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                          : "bg-slate-100 text-slate-500 border-slate-200"
-                      }`}
-                    >
-                      {zone.active ? "Dispatching" : "Offline"}
-                    </span>
-                  </div>
-                </Card>
-              ))}
+                  </Card>
+                );
+              })}
             </div>
           )}
         </div>
       </div>
 
-      {/* Add Zone Modal */}
+      {/* Save Drawn Zone Modal */}
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title="Add Delivery Zone (Supabase)"
-        description="Insert an operational zone boundary directly into PostgreSQL."
+        title="Save Delivery Zone"
+        description={`Saving polygon with ${drawingPoints.length} vertices into Supabase PostgreSQL.`}
       >
-        <form onSubmit={handleCreateZone} className="space-y-4">
+        <form onSubmit={handleSaveDrawnZone} className="space-y-4">
           {formError && (
             <div className="rounded-lg bg-rose-50 p-2.5 text-xs text-rose-700 border border-rose-200">
               {formError}
@@ -385,7 +471,7 @@ export default function DeliveryZonesPage() {
 
           <Input
             label="Zone Name"
-            placeholder="e.g. West Coast Commercial District"
+            placeholder="e.g. Downtown Central District"
             value={formName}
             onChange={(e) => setFormName(e.target.value)}
             disabled={isSaving}
@@ -420,15 +506,15 @@ export default function DeliveryZonesPage() {
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-700">GeoJSON Polygon Coordinates [[lng, lat], ...]</label>
-            <textarea
-              rows={4}
-              value={formCoordinates}
-              onChange={(e) => setFormCoordinates(e.target.value)}
-              disabled={isSaving}
-              className="w-full font-mono text-xs rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 focus:border-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-600"
-            />
+          <div className="rounded-lg bg-slate-50 p-3 border border-slate-200 space-y-1 text-xs">
+            <span className="font-semibold text-slate-700 block">Drawn Vertices Preview:</span>
+            <div className="font-mono text-[11px] text-slate-600 max-h-24 overflow-y-auto space-y-0.5">
+              {drawingPoints.map(([lat, lng], idx) => (
+                <div key={idx}>
+                  Point {idx + 1}: [{lat.toFixed(5)}, {lng.toFixed(5)}]
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="flex items-center justify-end gap-2 pt-4 border-t border-slate-100">
@@ -442,7 +528,7 @@ export default function DeliveryZonesPage() {
               Cancel
             </Button>
             <Button type="submit" variant="primary" size="sm" isLoading={isSaving}>
-              Save Zone to Supabase
+              Save Delivery Zone
             </Button>
           </div>
         </form>
